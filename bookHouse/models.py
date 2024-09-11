@@ -12,7 +12,7 @@ class PublicationType(models.Model):
 class Book(models.Model):
     name = models.CharField('Наименование книги', max_length=200)
     pub_date = models.DateField('Дата издания')
-    author = models.ForeignKey(Author, on_delete=models.PROTECT)
+    author = models.ManyToManyField(Author)
     publication_type = models.ForeignKey(PublicationType, on_delete=models.SET_NULL, null=True)
     number = models.PositiveIntegerField("Номер")
     page_count = models.PositiveSmallIntegerField('Количество страниц')
@@ -40,6 +40,9 @@ class BookCase(models.Model):
 
     class Meta:
         verbose_name = 'Стеллаж'
+        constraints = [
+            models.UniqueConstraint(fields=['number', 'book_hall'], name='Номер стеллажа должен быть уникален в рамках зала')
+        ]
 
 
 class BookShelf(models.Model):
@@ -48,6 +51,9 @@ class BookShelf(models.Model):
 
     class Meta:
         verbose_name = 'Полка'
+        constraints = [
+            models.UniqueConstraint(fields=['number', 'book_case'], name='Номер полки должен быть уникален в рамках стеллажа')
+        ]
 
 
 class Reader(models.Model):
