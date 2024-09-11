@@ -18,6 +18,12 @@ class Book(models.Model):
     page_count = models.PositiveSmallIntegerField('Количество страниц')
     description = models.TextField("Описание")
 
+    class Meta:
+        verbose_name = 'Книга'
+        constraints = [
+            models.UniqueConstraint(fields=['number'], name='Номер книги должен быть уникальным')
+        ]
+
 
 class Librarian(models.Model):
     fio = models.CharField('Ф.И.О.', max_length=200)
