@@ -2,7 +2,7 @@ import datetime
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Count
+from django.db.models import Count, OuterRef, Subquery, Aggregate, CharField
 
 MAX_BOOKS_ON_SHELF = 10
 
@@ -84,11 +84,11 @@ class Book(models.Model):
             models.UniqueConstraint(fields=['number'], name='Номер книги должен быть уникальным')
         ]
 
-    def GiveFirstShelfBook(self) -> BookShelf:
+    def give_first_shelf_book(self) -> BookShelf:
         return BookShelf.objects.annotate(books_count=Count('books')).filter(books_count__lt=MAX_BOOKS_ON_SHELF).first()
 
-    def ReturnToLibrary(self, reader: Reader, librarian: Librarian):
-        shelf = self.GiveFirstShelfBook()
+    def return_to_library(self, reader: Reader, librarian: Librarian):
+        shelf = self.give_first_shelf_book()
 
         if shelf is None:
             raise ValidationError("Полки закончились")
@@ -102,7 +102,7 @@ class Book(models.Model):
                                        date_time_move=datetime.datetime.now(),
                                        librarian=librarian, returned=True)
 
-    def TakeOnHands(self, reader: Reader, librarian: Librarian, in_library):
+    def take_on_hands(self, reader: Reader, librarian: Librarian, in_library):
         if self.book_shelf == None:
             raise ValidationError("Невозможно выдать книгу. Книга уже выдана другому читателю.")
 
@@ -135,15 +135,74 @@ class MoveBookJournal(models.Model):
         verbose_name = 'Журнал перемещения/выдачи/приема'
 
 
-def GetCountBooksByAuthor(author_fio):
+def get_count_books_by_author(author_fio):
     return Book.objects.filter(author__fio=author_fio).count()
 
 
-def GetTopTenBooks():
+def get_top_ten_books():
     return MoveBookJournal.objects.values('book__name').annotate(book_count=Count("book")).filter(
         to_book_shelf=None).order_by('-book_count')[:10]
 
 
-def CountBookOnNandsByReaders():
+def count_book_on_hands_by_readers():
     return MoveBookJournal.objects.annotate(count_book=Count("reader")).values('reader__fio', 'count_book').filter(
         returned=False)
+
+
+class GroupConcat(Aggregate):
+    function = 'GROUP_CONCAT'
+    template = '%(function)s(%(distinct)s%(expressions)s)'
+
+    def __init__(self, expression, distinct=False, **extra):
+        super(GroupConcat, self).__init__(
+            expression,
+            distinct='DISTINCT ' if distinct else '',
+            output_field=CharField(),
+            **extra)
+
+
+def get_halls_with_related_cases_and_shelfs():
+    shelves_subquery = Subquery(BookShelf.objects.filter(book_case=OuterRef('pk')).values('book_case').annotate(
+        bookShelvesNumbers=GroupConcat('number')).values('bookShelvesNumbers'))
+
+    shelves_by_cases_subquery = Subquery(
+        BookCase.objects.annotate(shelves=shelves_subquery).values('number', 'shelves', 'book_hall').filter(
+            book_hall=OuterRef('pk')).values('shelves'))
+
+    cases_subquery = Subquery(BookCase.objects.filter(book_hall=OuterRef('pk')).values('book_hall').annotate(
+        bookCasesNumbers=GroupConcat('number')).values('bookCasesNumbers'))
+
+    halls = BookHall.objects.annotate(shelves=shelves_by_cases_subquery, cases=cases_subquery).values('name', 'cases',
+                                                                                                      'shelves')
+
+    return list(halls)
+
+
+# результат [{'name': 'Зал 1', 'cases': '1,2,3,4,5', 'shelves': '1,2,3,4,5,6,7,8,9,10'}, {'name': 'Зал 2', 'cases': '1,2,3,4,5', 'shelves': '1,2,3,4,5,6,7,8,9,10'}, {'name': 'Зал 3', 'cases': '1,2,3,4,5', 'shelves': '1,2,3,4,5,6,7,8,9,10'}]
+
+def get_publications_with_books_that_not_taken():
+    cnt_mov_book_subquery = Subquery(
+        MoveBookJournal.objects.filter(book=OuterRef('pk')).annotate(book_count=Count("book")).filter(
+            to_book_shelf=None).values('book_count'))
+
+    books_not_taken_subquery = Subquery(
+        Book.objects.filter(publication_type=OuterRef('pk')).annotate(cnt_book_move=cnt_mov_book_subquery).values(
+            'name').filter(cnt_book_move=None))
+
+    return PublicationType.objects.annotate(books_not_taken_list=books_not_taken_subquery).values('name',
+                                                                                                  'books_not_taken_list')
+
+
+# результат <QuerySet [{'name': 'Печатное', 'books_not_taken_list': 'Руслан и Людмила'}, {'name': 'Электронное', 'books_not_taken_list': 'Книга для примера'}]>
+
+
+def get_move_book_journal_shelves_by_book():
+    journal_by_shelve = MoveBookJournal.objects.values('book', 'to_book_shelf').exclude(to_book_shelf=None)
+
+    shelves_subquery = Subquery(journal_by_shelve.filter(book=OuterRef('pk')).values('book').annotate(
+        to_book_shelf_list=GroupConcat('to_book_shelf')).values('to_book_shelf_list'))
+
+    return Book.objects.annotate(shelves_list=shelves_subquery).values(
+        'name', 'shelves_list')
+
+# <QuerySet [{'name': 'Руслан и Людмила', 'shelves_list': '3'}, {'name': 'Сборник стихов', 'shelves_list': '1,21'}, {'name': 'Книга для примера', 'shelves_list': None}]>
