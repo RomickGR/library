@@ -17,25 +17,40 @@ class Author(models.Model):
 class PublicationType(models.Model):
     name = models.CharField('Название типа публикации', max_length=100)
 
+    def __str__(self):
+        return self.name
+
 
 class Librarian(models.Model):
     fio = models.CharField('Ф.И.О.', max_length=200)
 
     class Meta:
         verbose_name = 'Библиотекарь'
+        constraints = [
+            models.UniqueConstraint(fields=['fio'],
+                                    name='Ф.И.О. должно быть уникальным')
+        ]
+
+    def __str__(self):
+        return self.fio
 
 
 class BookHall(models.Model):
     name = models.CharField('Имя зала', max_length=200)
-    librarian = models.ForeignKey(Librarian, on_delete=models.PROTECT)
+    librarian = models.ForeignKey(Librarian, on_delete=models.PROTECT, related_name='book_hall')
 
     class Meta:
         verbose_name = 'Книжный зал'
 
+    @property
+    def get_book_cases_names(self):
+        cases = self.book_case.all()
+        return ', '.join(str(cs.number) for cs in cases)
+
 
 class BookCase(models.Model):
     number = models.PositiveIntegerField('Номер стеллажа')
-    book_hall = models.ForeignKey(BookHall, on_delete=models.PROTECT)
+    book_hall = models.ForeignKey(BookHall, on_delete=models.PROTECT, related_name='book_case')
 
     class Meta:
         verbose_name = 'Стеллаж'
@@ -44,10 +59,15 @@ class BookCase(models.Model):
                                     name='Номер стеллажа должен быть уникален в рамках зала')
         ]
 
+    @property
+    def get_book_shelf_names(self):
+        book_shelfs = self.book_shelf.all()
+        return ', '.join(str(bs.number) for bs in book_shelfs)
+
 
 class BookShelf(models.Model):
     number = models.PositiveIntegerField('Номер полки')
-    book_case = models.ForeignKey(BookCase, on_delete=models.PROTECT)
+    book_case = models.ForeignKey(BookCase, on_delete=models.PROTECT, related_name='book_shelf')
 
     class Meta:
         verbose_name = 'Полка'
@@ -55,6 +75,10 @@ class BookShelf(models.Model):
             models.UniqueConstraint(fields=['number', 'book_case'],
                                     name='Номер полки должен быть уникален в рамках стеллажа')
         ]
+
+    def __str__(self):
+        return ''.join(['Номер полки: ' + str(self.number) + ' (Стеллаж: ' + str(
+            self.book_case.number) + ')' + ' (Зал: ' + str(self.book_case.book_hall.name) + ')'])
 
 
 class Reader(models.Model):
@@ -67,8 +91,8 @@ class Reader(models.Model):
 class Book(models.Model):
     name = models.CharField('Наименование книги', max_length=200)
     pub_date = models.DateField('Дата издания', null=True)
-    author = models.ManyToManyField(Author)
-    publication_type = models.ForeignKey(PublicationType, on_delete=models.SET_NULL, null=True)
+    author = models.ManyToManyField(Author, related_name='books')
+    publication_type = models.ForeignKey(PublicationType, on_delete=models.SET_NULL, null=True, related_name='books')
     number = models.PositiveIntegerField("Номер")
     page_count = models.PositiveSmallIntegerField('Количество страниц')
     description = models.TextField("Описание")
@@ -83,6 +107,9 @@ class Book(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['number'], name='Номер книги должен быть уникальным')
         ]
+
+    def __str__(self):
+        return ''.join([self.name + ' (', self.publication_type.name, ')'])
 
     def give_first_shelf_book(self) -> BookShelf:
         return BookShelf.objects.annotate(books_count=Count('books')).filter(books_count__lt=MAX_BOOKS_ON_SHELF).first()
@@ -124,7 +151,7 @@ class MoveBookJournal(models.Model):
                                         null=True, related_name='from_book_shelf')
     to_book_shelf = models.ForeignKey(BookShelf, verbose_name='Куда переместили', on_delete=models.PROTECT, null=True,
                                       related_name='to_book_shelf')
-    date_time_move = models.DateTimeField('Дата перемещения/выдачи/сдачи')
+    date_time_move = models.DateTimeField('Дата перемещения/выдачи/сдачи', auto_now_add=True)
     librarian = models.ForeignKey(Librarian, verbose_name="Библиотекарь внесший перемещение/выдачу/прием книги",
                                   on_delete=models.PROTECT)
     reader = models.ForeignKey(Reader, on_delete=models.PROTECT, null=True)
@@ -141,7 +168,7 @@ def get_count_books_by_author(author_fio):
 
 def get_top_ten_books():
     return MoveBookJournal.objects.values('book__name').annotate(book_count=Count("book")).filter(
-        to_book_shelf=None).order_by('-book_count')[:10]
+        to_book_shelf__isnull=True).order_by('-book_count')[:10]
 
 
 def count_book_on_hands_by_readers():
@@ -183,11 +210,11 @@ def get_halls_with_related_cases_and_shelfs():
 def get_publications_with_books_that_not_taken():
     cnt_mov_book_subquery = Subquery(
         MoveBookJournal.objects.filter(book=OuterRef('pk')).annotate(book_count=Count("book")).filter(
-            to_book_shelf=None).values('book_count'))
+            to_book_shelf__isnull=True).values('book_count'))
 
     books_not_taken_subquery = Subquery(
         Book.objects.filter(publication_type=OuterRef('pk')).annotate(cnt_book_move=cnt_mov_book_subquery).values(
-            'name').filter(cnt_book_move=None))
+            'name').filter(cnt_book_move__isnull=True))
 
     return PublicationType.objects.annotate(books_not_taken_list=books_not_taken_subquery).values('name',
                                                                                                   'books_not_taken_list')
@@ -197,7 +224,7 @@ def get_publications_with_books_that_not_taken():
 
 
 def get_move_book_journal_shelves_by_book():
-    journal_by_shelve = MoveBookJournal.objects.values('book', 'to_book_shelf').exclude(to_book_shelf=None)
+    journal_by_shelve = MoveBookJournal.objects.values('book', 'to_book_shelf').exclude(to_book_shelf__isnull=True)
 
     shelves_subquery = Subquery(journal_by_shelve.filter(book=OuterRef('pk')).values('book').annotate(
         to_book_shelf_list=GroupConcat('to_book_shelf')).values('to_book_shelf_list'))
